@@ -68,29 +68,29 @@ def infer(values):
     return "JSON"
 
 
-def mappings(rows):
-    columns, excluded = [], []
-    taken = {"message", "ingested_at"}
-    def visit(objects, prefix):
-        for key in dict.fromkeys(k for obj in objects for k in obj):
-            path = prefix + [key]
-            values = [obj.get(key) for obj in objects]
-            kind = infer(values)
-            children = [v for v in values if isinstance(v, dict)]
-            print("\nПоле", json.dumps(path, ensure_ascii=False), "• тип по примерам:", kind)
-            options = ["c", "m"]
-            label = "c — колонка, m — оставить в message"
-            if children:
-                options.append("n")
-                label += ", n — выбрать вложенные колонки и сохранить объект в message"
-            action = choice(label, options, "m" if kind == "JSON" else "c")
-            if action == "n":
-                visit(children, path)
-            elif action == "c":
-                hint = re.sub(r"[^\w]+", "_", "_".join(path)).strip("_") or "field"
-                if hint in taken:
-                    hint += "_value"
-                while True:
-                    name = ask("Имя колонки", hint)
-                    if name not in taken:
-                        break
+def render(db, base, brokers, topic, group, ttl, columns, excluded):
+    source, target, view = [ident(db) + "." + ident(n) for n in
+                            (base, base + "_detail", "mv_" + base)]
+    ddl_source = f"""CREATE TABLE {source}
+(
+    payload String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = {literal(brokers)},
+    kafka_topic_list = {literal(topic)},
+    kafka_group_name = {literal(group)},
+    kafka_format = 'JSONAsString';"""
+    defs = ["ingested_at DateTime('UTC')"]
+    fields = ["now('UTC') AS ingested_at"]
+    for path, name, dtype in columns:
+        keys = ", ".join(map(literal, path))
+        typ = "Nullable(" + ("String" if dtype == "JSON" else dtype) + ")"
+        expr = (f"nullIf(JSONExtractRaw(src.payload, {keys}), '')" if dtype == "JSON"
+                else f"JSONExtract(src.payload, {keys}, {literal(typ)})")
+        defs.append(f"{ident(name)} {typ}")
+        fields.append(f"{expr} AS {ident(name)}")
+    defs.append("message String")
+    remainder = "src.payload"
+    if excluded:
+        keys = ", ".join(map(literal, excluded))
